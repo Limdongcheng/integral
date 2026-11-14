@@ -87,6 +87,7 @@ shell via `Shell::new_spherical`; Schwarz-screened ERIs via
 | C ABI (`integral-sys`) | Minimal | ABI version surface only |
 | Parallel dense-ERI seam (`EriBuilder`, call-site threads) | ✅ | safe, no in-crate runtime |
 | Cached direct J/K plan (`DirectContractor`) | ✅ | caller-owned worker workspaces and matrices |
+| Density-direct ERI-gradient plan (`DirectGradContractor`) | ✅ | product-form densities, no `nao⁴` tensor; caller-owned worker accumulators |
 
 **Threading.** The library is **single-threaded but thread-safe**: integral
 builders take `&self` and share no mutable state, so the recommended way to

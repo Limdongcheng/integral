@@ -51,6 +51,7 @@ pub mod math;
 
 mod df;
 mod direct;
+mod direct_grad;
 mod ecp;
 mod eri_batch;
 mod eri_builder;
@@ -67,6 +68,7 @@ use std::fmt;
 
 pub use df::{Bra3cFill, Eri3cBuilder};
 pub use direct::{DirectBuffers, DirectContractor, DirectWorkspace};
+pub use direct_grad::{DirectGradContractor, DirectGradWorkspace, GradDensity, GradDensityTerm};
 pub use ecp::{Ecp, EcpPrimitive, MAX_ECP_GRAD_L};
 pub use eri_builder::{BraPairFill, EriBuilder};
 pub use grad::{Gradient1e, GradientEri, MAX_GRAD_L};
