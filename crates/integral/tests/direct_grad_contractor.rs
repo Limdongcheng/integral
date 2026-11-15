@@ -784,3 +784,67 @@ fn contractor_is_send_and_sync() {
     fn assert_send<T: Send>() {}
     assert_send::<DirectGradWorkspace>();
 }
+
+/// A density carries per-shell-block bounds, so it belongs to the shell layout
+/// of the plan that prepared it: equal `nao` is not enough.
+#[test]
+#[should_panic(expected = "different shell layout")]
+fn accumulate_rejects_density_from_a_different_shell_layout() {
+    let origin = [0.0, 0.0, 0.0];
+    let one_p = Basis::new(vec![Shell::new(1, origin, vec![1.0], vec![1.0]).unwrap()]);
+    let three_s = Basis::new(
+        (0..3)
+            .map(|i| Shell::new(0, [f64::from(i), 0.0, 0.0], vec![1.0], vec![1.0]).unwrap())
+            .collect(),
+    );
+    assert_eq!(one_p.nao(), three_s.nao());
+    let p = symmetric(one_p.nao(), 1);
+    let terms = [GradDensityTerm {
+        factor: 1.0,
+        left: &p,
+        right: &p,
+    }];
+    let density = one_p.direct_grad_contractor().unwrap().density(&terms, &[]);
+    let _ = three_s
+        .direct_grad_contractor()
+        .unwrap()
+        .contract(&density, EriKernel::Coulomb, 1e-12);
+}
+
+/// `threshold = 0.0` disables screening altogether, including for a bra pair
+/// whose Schwarz bound underflows to exactly zero while its derivative
+/// integrals do not.
+#[test]
+fn zero_threshold_keeps_pairs_with_zero_schwarz_bound() {
+    let basis = Basis::new(vec![
+        Shell::new(0, [0.0, 0.0, 0.0], vec![1.0], vec![1.0]).unwrap(),
+        Shell::new(0, [13.0, 0.0, 0.0], vec![1.0], vec![1.0]).unwrap(),
+    ]);
+    let n = basis.nao();
+    assert_eq!(basis.schwarz_bounds()[n], 0.0, "premise: Q_10 underflows");
+    // Off-diagonal only, so the density selects the `(10|10)` quartet alone.
+    let p = vec![0.0, 1.0, 1.0, 0.0];
+    let terms = [GradDensityTerm {
+        factor: 1.0,
+        left: &p,
+        right: &p,
+    }];
+    let gamma = dense_gamma(n, &terms, &[]);
+    // The OS/HGP engine drops this primitive pair in both code paths, so only
+    // the Rys reference is required to be non-zero.
+    for engine in [Engine::Rys, Engine::OsHgp, Engine::Auto] {
+        let reference = basis.eri_grad_contract_with(engine, &gamma).unwrap();
+        let contractor = DirectGradContractor::with_engine(&basis, engine).unwrap();
+        let density = contractor.density(&terms, &[]);
+        let direct = contractor.contract(&density, EriKernel::Coulomb, 0.0);
+        let scale = max_abs(&reference);
+        if engine == Engine::Rys {
+            assert!(scale > 0.0, "premise: the dense Rys reference is non-zero");
+        }
+        let diff = max_diff(&direct, &reference);
+        assert!(
+            diff <= 1e-10 * scale,
+            "{engine:?}: direct {direct:?} vs reference {reference:?}"
+        );
+    }
+}

@@ -36,10 +36,16 @@ struct BoundedTerm<'a> {
 
 /// A two-particle density prepared for [`DirectGradContractor::accumulate_bra_pair`]:
 /// the product terms plus their per-shell-block magnitudes used for screening.
+///
+/// The magnitudes are partitioned by the shells of the plan that prepared the
+/// density, so it can only be contracted by a plan with the same shell layout.
 #[derive(Debug)]
 pub struct GradDensity<'a> {
     coulomb: Vec<BoundedTerm<'a>>,
     exchange: Vec<BoundedTerm<'a>>,
+    /// First-function offset of every shell of the preparing plan.
+    offsets: Vec<usize>,
+    nao: usize,
 }
 
 /// Reusable worker-local scratch. Construct one per worker and reuse it across
@@ -278,6 +284,8 @@ impl DirectGradContractor {
         GradDensity {
             coulomb: coulomb.iter().map(bound).collect(),
             exchange: exchange.iter().map(bound).collect(),
+            offsets: self.offsets.clone(),
+            nao: self.nao,
         }
     }
 
@@ -306,14 +314,16 @@ impl DirectGradContractor {
     /// Add the contribution of every canonical ket pair of one canonical bra
     /// pair to `out` (length [`Self::natom`]). A quartet is skipped when
     /// `Q_ij · Q_kl`, or that product times the magnitude of its two-particle
-    /// density block, is below `threshold`; `threshold = 0.0` keeps everything.
+    /// density block, is below `threshold`; `threshold = 0.0` keeps everything,
+    /// including pairs whose Schwarz factor is exactly zero.
     ///
     /// The Schwarz factors bound the integrals rather than their derivatives,
     /// so the test is an estimate, as in direct SCF.
     ///
     /// # Panics
     /// Panics if `out.len() != natom`, if `bra` is not a pair from
-    /// [`Self::bra_pairs`], or if `kernel` is `Erf` with a non-finite or
+    /// [`Self::bra_pairs`], if `density` was prepared by a plan with a
+    /// different shell layout, or if `kernel` is `Erf` with a non-finite or
     /// non-positive `ω`.
     pub fn accumulate_bra_pair(
         &self,
@@ -330,9 +340,13 @@ impl DirectGradContractor {
         }
         let (i, j) = bra;
         assert!(j <= i && i < self.shells.len());
+        assert!(
+            density.nao == self.nao && density.offsets == self.offsets,
+            "density was prepared by a plan with a different shell layout"
+        );
         let nsh = self.shells.len();
         let qab = self.schwarz[i * nsh + j];
-        if qab == 0.0 {
+        if qab == 0.0 && threshold > 0.0 {
             return;
         }
         let atoms = &self.shell_atom;
