@@ -84,3 +84,29 @@ fn screening_only_drops_integrals_below_the_bound() {
     }
     assert!(dropped > 0, "the far-apart shells must trigger screening");
 }
+
+#[test]
+fn unscreened_build_keeps_integrals_below_the_schwarz_underflow() {
+    // Two unit-exponent s shells 13 bohr apart: the Schwarz bound of the mixed
+    // pair underflows, yet (10|00) is a nonzero ~3e-38 on the Rys engine.
+    let basis = Basis::new(vec![
+        Shell::new(0, [0.0, 0.0, 0.0], vec![1.0], vec![1.0]).unwrap(),
+        Shell::new(0, [0.0, 0.0, 13.0], vec![1.0], vec![1.0]).unwrap(),
+    ]);
+    let n = basis.nao();
+    let dense = basis.eri_with(Engine::Rys);
+    let builder = PackedEriBuilder::with_engine(&basis, Engine::Rys);
+    let packed = builder.build(0.0);
+    let mut tiny = 0;
+    for (t, &(p, q)) in builder.ao_pairs().iter().enumerate() {
+        for (u, &(r, s)) in builder.ao_pairs()[..=t].iter().enumerate() {
+            let want = dense[((p * n + q) * n + r) * n + s];
+            assert_eq!(packed[t * (t + 1) / 2 + u], want, "({p}{q}|{r}{s})");
+            tiny += usize::from(want != 0.0 && want.abs() < 1e-30);
+        }
+    }
+    assert!(
+        tiny > 0,
+        "the test needs a nonzero integral below the bound"
+    );
+}

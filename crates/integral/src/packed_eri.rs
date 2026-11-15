@@ -2,8 +2,10 @@
 //!
 //! The dense [`EriBuilder`](crate::EriBuilder) stores all `nao⁴` elements and, to
 //! keep bra-pair tasks disjoint, evaluates both `(ij|kl)` and `(kl|ij)`. This
-//! builder stores each of the `nao⁴/8` symmetry-unique integrals once and
-//! evaluates each canonical shell quartet (`i ≥ j`, `k ≥ l`, `ij ≥ kl`) once.
+//! builder stores each of the `nao⁴/8` symmetry-unique integrals once, and a
+//! fill evaluates each canonical shell quartet (`i ≥ j`, `k ≥ l`, `ij ≥ kl`)
+//! once. Screening adds one `(ij|ij)` block per canonical shell pair, evaluated
+//! on the first screened fill; an unscreened build never computes them.
 //!
 //! ## Layout
 //!
@@ -19,6 +21,7 @@
 //! slice of the triangle.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use crate::engine::os_eri::{self, ShellPairData, ShellRef};
 use crate::eri_batch::{batch_key, evaluate_batch4, BatchKey, EriBatchScratch};
@@ -69,7 +72,8 @@ pub struct PackedEriBuilder {
     c2s: Vec<Option<Vec<f64>>>,
     pairs: Vec<(usize, usize)>,
     pair_data: Vec<ShellPairData>,
-    schwarz: Vec<f64>,
+    /// Schwarz bound of each canonical shell pair, built on the first screened fill.
+    schwarz: OnceLock<Vec<f64>>,
     /// First AO-pair index of each canonical shell pair, plus the total count.
     pair_start: Vec<usize>,
     ao_pairs: Vec<(usize, usize)>,
@@ -118,7 +122,7 @@ impl PackedEriBuilder {
             c2s,
             pairs,
             pair_data,
-            schwarz: basis.schwarz_bounds(),
+            schwarz: OnceLock::new(),
             pair_start,
             ao_pairs,
         }
@@ -167,9 +171,10 @@ impl PackedEriBuilder {
         tasks
     }
 
-    /// Fill one bra shell pair's rows. Quartets whose Schwarz bound
-    /// `Q_ij·Q_kl` is below `threshold` are skipped, leaving the zeros the
-    /// caller initialized.
+    /// Fill one bra shell pair's rows. With `threshold > 0`, quartets whose
+    /// Schwarz bound `Q_ij·Q_kl` is below it are skipped, leaving the zeros the
+    /// caller initialized. With `threshold = 0.0` nothing is screened and every
+    /// quartet is evaluated, including those whose bound underflows to zero.
     pub fn fill(
         &self,
         workspace: &mut PackedEriWorkspace,
@@ -178,15 +183,11 @@ impl PackedEriBuilder {
     ) {
         let bra = task.bra;
         let (i, j) = self.pairs[bra];
-        let nsh = self.shells.len();
-        let qab = self.schwarz[i * nsh + j];
-        if qab == 0.0 {
-            return;
-        }
+        let schwarz = (threshold > 0.0).then(|| self.schwarz_bounds());
         workspace.pending.clear();
         for ket in 0..=bra {
             let (k, l) = self.pairs[ket];
-            if qab * self.schwarz[k * nsh + l] < threshold {
+            if schwarz.is_some_and(|q| q[bra] * q[ket] < threshold) {
                 continue;
             }
             let key = batch_key(
@@ -238,6 +239,37 @@ impl PackedEriBuilder {
             self.fill(&mut workspace, task, threshold);
         }
         out
+    }
+
+    /// `Q = sqrt(max |(μν|μν)|)` per canonical shell pair, from this builder's engine.
+    fn schwarz_bounds(&self) -> &[f64] {
+        self.schwarz.get_or_init(|| {
+            let mut scratch = QuartetScratch::default();
+            self.pairs
+                .iter()
+                .enumerate()
+                .map(|(pair, &(i, j))| {
+                    let idx = [i, j, i, j];
+                    quartet_into_scratch_pairs(
+                        &mut scratch,
+                        self.engine,
+                        idx.map(|q| &self.shells[q]),
+                        idx.map(|q| self.eff[q].as_slice()),
+                        idx.map(|q| self.c2s[q].as_deref()),
+                        &self.pair_data[pair],
+                        &self.pair_data[pair],
+                    );
+                    let (ni, nj) = (self.nfunc[i], self.nfunc[j]);
+                    let mut max = 0.0_f64;
+                    for a in 0..ni {
+                        for b in 0..nj {
+                            max = max.max(scratch.block[((a * nj + b) * ni + a) * nj + b].abs());
+                        }
+                    }
+                    max.sqrt()
+                })
+                .collect()
+        })
     }
 
     fn fill_scalar(
