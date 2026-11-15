@@ -10,12 +10,13 @@
 //!   cargo run --release -p integral-benches --example eri_profile -- ethylene [reps]
 //!   cargo run --release -p integral-benches --example eri_profile -- micro [reps]
 //!   cargo run --release -p integral-benches --example eri_profile -- classes [water|ethylene] [passes]
+//!   cargo run --release -p integral-benches --example eri_profile -- grad [water|ethylene] [reps]
 //!   cargo run --release -p integral-benches --example eri_profile -- fp | boys | prof [secs]
 
 use std::time::Instant;
 
 use integral::math::boys::boys_array;
-use integral::{Basis, Engine, Shell};
+use integral::{Basis, Engine, EriKernel, GradDensityTerm, Shell};
 
 /// Counting allocator: verifies the hot kernel loop is allocation-free after
 /// warm-up. Counts only; delegates to the system allocator. The lib crates
@@ -194,6 +195,78 @@ fn run_basis(name: &str, basis: Basis, reps: usize) {
             t.iter().take(1).sum::<f64>()
         });
         println!("  eri_with({eng_name:5})  median={med:8.4}s  min={min:8.4}s  (chk {sum:.3e})");
+    }
+}
+
+/// Dense `eri_grad_contract` against `DirectGradContractor::contract` on the
+/// closed-shell-shaped density `Γ = ½·P[μν]P[λσ] − ¼·P[μλ]P[νσ]` of a synthetic
+/// symmetric `P`. The dense path gets the explicit `nao⁴` tensor (built outside
+/// the timed region); the direct path only `P`.
+fn grad_contract(name: &str, basis: Basis, reps: usize) {
+    let n = basis.nao();
+    println!(
+        "\n== {name} ERI-gradient contraction: {} shells, {n} bf, {} atoms ==",
+        basis.shells().len(),
+        basis.atoms().len()
+    );
+    let mut p = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let sign = if (i + j) % 3 == 0 { -1.0 } else { 1.0 };
+            p[i * n + j] = sign * 0.6 / (1.0 + i.abs_diff(j) as f64);
+        }
+    }
+    let mut gamma = vec![0.0; n * n * n * n];
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..n {
+                for l in 0..n {
+                    gamma[((i * n + j) * n + k) * n + l] =
+                        0.5 * p[i * n + j] * p[k * n + l] - 0.25 * p[i * n + k] * p[j * n + l];
+                }
+            }
+        }
+    }
+    let coulomb = [GradDensityTerm {
+        factor: 0.5,
+        left: &p,
+        right: &p,
+    }];
+    let exchange = [GradDensityTerm {
+        factor: -0.25,
+        left: &p,
+        right: &p,
+    }];
+    let contractor = basis
+        .direct_grad_contractor()
+        .expect("cc-pVDZ stays within MAX_GRAD_L");
+    let density = contractor.density(&coulomb, &exchange);
+
+    let mut dense = Vec::new();
+    let (dense_med, dense_min, _) = time_it(reps, || {
+        dense = basis
+            .eri_grad_contract(&gamma)
+            .expect("cc-pVDZ stays within MAX_GRAD_L");
+        dense[0][0]
+    });
+    println!(
+        "  eri_grad_contract (dense, all quartets)  median={dense_med:8.4}s  min={dense_min:8.4}s"
+    );
+    for threshold in [0.0, 1e-10] {
+        let mut direct = Vec::new();
+        let (med, min, _) = time_it(reps, || {
+            direct = contractor.contract(&density, EriKernel::Coulomb, threshold);
+            direct[0][0]
+        });
+        let diff = dense
+            .iter()
+            .flatten()
+            .zip(direct.iter().flatten())
+            .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        println!(
+            "  DirectGradContractor (threshold {threshold:5.0e})  median={med:8.4}s  min={min:8.4}s  speedup={:6.1}x  max|diff|={diff:.3e}",
+            dense_med / med
+        );
     }
 }
 
@@ -464,6 +537,15 @@ fn main() {
             ethylene(false),
             reps,
         ),
+        "grad" => {
+            let which = args.get(2).map(String::as_str).unwrap_or("water");
+            let reps: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
+            if which == "ethylene" {
+                grad_contract("ethylene/cc-pVDZ (spherical)", ethylene(true), reps);
+            } else {
+                grad_contract("water/cc-pVDZ (spherical)", water(true), reps);
+            }
+        }
         "micro" => micro(reps),
         "all" => {
             run_basis("water/cc-pVDZ", water(true), reps);

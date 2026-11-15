@@ -77,6 +77,12 @@ metadata, primitive-pair data, Schwarz bounds, and batch dispatch once. A caller
 then owns one reusable `DirectWorkspace` per worker and caller-owned J/K buffers;
 one quartet traversal can contract multiple row-major densities.
 
+Gradient drivers can use `Basis::direct_grad_contractor()` the same way: it
+contracts ERI derivatives with a two-particle density given as Coulomb- and
+exchange-type products of symmetric matrices, so no `nao^4` tensor is formed.
+Each worker owns a `DirectGradWorkspace` and a per-atom accumulator, and the
+caller sums the accumulators.
+
 ## Validation
 
 The test suite checks:
